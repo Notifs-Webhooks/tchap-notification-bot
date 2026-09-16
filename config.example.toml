@@ -17,6 +17,8 @@ matrix_store_path = "/data/store"
 matrix_session_path = "/data/session.txt"
 
 bot_display_name = "Notifier"
+# The bundled icon.png is used by default. Set this to use another PNG file.
+# bot_avatar_path = "/app/icon.png"
 room_name = "Docs notifications"
 room_topic = "Notifications about changes to your documents. Leave this room to stop receiving them."
 

@@ -50,7 +50,12 @@ The process runs three components in the same asynchronous event loop:
 
 SQLite stores conversations, deliveries, and idempotency keys. The
 `matrix-nio` store holds the device's cryptographic identity. The database,
-cryptographic store, and session file must all be persisted.
+cryptographic store, session file, and avatar media cache must all be
+persisted. On startup, Notifier uploads the bundled `icon.png` to Matrix and
+sets it as the account avatar. The cached Matrix media URI prevents duplicate
+uploads on subsequent restarts; replacing `icon.png` automatically triggers a
+new upload. The same image is assigned to every notification conversation,
+including existing rooms discovered at startup.
 
 ## HTTP API
 
@@ -287,7 +292,9 @@ In production:
 
 `NOTIFIER_*` environment variables override `config.toml`, including
 `NOTIFIER_API_TOKEN`, `NOTIFIER_BOT_PASSWORD`, and `NOTIFIER_HOMESERVER`.
-`NOTIFIER_CONFIG` selects a different TOML configuration file.
+`NOTIFIER_CONFIG` selects a different TOML configuration file. Set
+`NOTIFIER_BOT_AVATAR_PATH` when deploying a different PNG outside the Docker
+image.
 
 ## Guarantees and limitations
 

@@ -84,4 +84,5 @@ ignore = [
     "S105",    # Possible hardcoded password assigned
     "ANN001",  # Pytest fixtures are injected dynamically
     "ARG001",  # A fixture may be requested only for its lifecycle
+    "SLF001",  # Unit tests exercise internal integration helpers directly
 ]
