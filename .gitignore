@@ -12,3 +12,5 @@ node_modules/
 store/
 session.txt
 config.toml
+data/
+.env

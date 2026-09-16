@@ -1,35 +1,34 @@
 [project]
-name = "sample_bot"
+name = "tchap-notifier"
 requires-python = ">=3.11"
 
 [tool.poetry]
-name = "sample_bot"
-version = "0.1"
-description = "Admin bot"
+name = "tchap-notifier"
+version = "0.1.0"
+description = "Docs notification service for Tchap direct messages"
 authors = ["Tchap Team <tech@tchap.beta.gouv.fr>"]
 license = "MIT"
 packages = [
-    { include = "scripts" },
+    { include = "notifier" },
 ]
 
 [tool.poetry.scripts]
-bot-entry-point = "scripts.startbot:main"
+notifier = "notifier.main:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-#tchap-bot = { path = "../tchapbot/", develop = true }
-tchap-bot = { git = "https://code.peren.fr/MatMaul/tchapbot.git", branch = "tchapadmin" }
-#tchap-bot = { git = "https://code.peren.fr/open-source/tchapbot.git", branch = "main" }
+tchap-bot = { git = "https://code.peren.fr/open-source/tchapbot.git", branch = "main" }
 pydantic = "^2.6.3"
 pydantic-settings = "^2.2.1"
-pyotp = "^2.9.0"
-feedparser = "^6.0.11"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.30.0" }
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.4.6"
 basedpyright = "^1.12.4"
 pytest = "^8.2.2"
 pytest-asyncio = "^0.23.7"
+httpx = "^0.27.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -37,17 +36,16 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pyright]
 pythonVersion = "3.11"
+include = ["notifier"]
 
 typeCheckingMode = "all"
 
 reportAny = false
+reportCallInDefaultInitializer = false
 reportUnknownMemberType = false
 reportMissingTypeStubs = false
 reportUnusedCallResult = false
-
-executionEnvironments = [
-  { root = "tests", reportAttributeAccessIssue = false },
-]
+reportUnusedFunction = false
 
 [tool.ruff.lint]
 select = [
@@ -69,6 +67,14 @@ ignore = [
     "S101",    # Use of `assert` detected
     "FIX002",  # Line contains TODO, consider resolving the issue
     "D",       # Missing docstring
+    "B008",    # FastAPI uses Depends in default argument values
+    "C901",    # FastAPI app factories contain several route handlers
+    "E501",    # SQL queries are clearer without artificial line splitting
+    "EM",      # Error messages stay close to their integration context
+    "EXE002",  # The development volume preserves executable bits
+    "SIM105",  # Explicit cancellation blocks better document intent
+    "TCH",     # Pydantic also needs these imports at runtime
+    "TRY003",  # Integration errors include server response context
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -76,4 +82,6 @@ ignore = [
     "ANN401",  # Dynamically typed expressions (typing.Any) are disallowed
     "PLW0603", # Using the global statement to update variable is discouraged
     "S105",    # Possible hardcoded password assigned
+    "ANN001",  # Pytest fixtures are injected dynamically
+    "ARG001",  # A fixture may be requested only for its lifecycle
 ]

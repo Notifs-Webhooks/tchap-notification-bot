@@ -1,0 +1,16 @@
+services:
+  notifier:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      NOTIFIER_CONFIG: /config.toml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - notifier_data:/data
+      - ./config.toml:/config.toml:ro
+
+volumes:
+  notifier_data:

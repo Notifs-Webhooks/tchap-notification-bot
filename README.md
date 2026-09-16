@@ -1,118 +1,297 @@
-Ce projet est basé sur le Tchap `matrix-admin-bot` : https://github.com/tchapgouv/matrix-admin-bot
+# Notifier
 
-Ce projet `matrix-admin-bot` est lui-même basé sur https://code.peren.fr/open-source/tchapbot qui gère le chiffrement dans Tchap.
+Notifier is an HTTP service that turns changes made in Docs into end-to-end
+encrypted Tchap direct messages.
 
-Il nécessite l'installation de Docker sur la machine qui hébergera le bot : https://www.docker.com/
+It is built on `tchap-bot`, the library used by Tchap bots, and `matrix-nio`.
+The Notifier account is a regular Tchap account: it cannot force a user to join
+a conversation.
 
-# Configuration de l'environnement
+## How consent works
 
-- Python 3.11+ est requis
-- Poetry est requis
+Enabling notifications is voluntary and happens in two stages:
+
+1. the Docs backend calls `POST /v1/subscriptions` after the user clicks the
+   future "Enable Tchap notifications" button;
+2. Notifier creates an encrypted private room and invites the user;
+3. the subscription remains `pending` until the user accepts the invitation in
+   Tchap;
+4. the Matrix membership transition from `invite` to `join` activates the
+   subscription;
+5. pending notifications are then delivered to the room;
+6. declining the invitation or leaving the room revokes the subscription and
+   cancels notifications that have not been sent yet.
+
+Notifier never automatically reinvites a user who declined the invitation or
+left the room. A new explicit `POST /v1/subscriptions` call, resulting from a
+new user action, is required.
+
+A notification looks like this:
+
+```text
+📝 Document updated
+
+Alice Martin updated "Budget 2027".
+
+Open document: https://docs.example.test/docs/42
 ```
-python -m venv .env
-source .env/bin/activate
-python install poetry
+
+Supported change types are `created`, `updated`, `renamed`, `commented`,
+`shared`, `deleted`, and `restored`.
+
+## Architecture
+
+The process runs three components in the same asynchronous event loop:
+
+- a FastAPI HTTP API on port `8085`;
+- a long-running Matrix synchronization loop that receives membership changes
+  and manages encryption;
+- a dispatcher that sends ready notifications and retries temporary failures.
+
+SQLite stores conversations, deliveries, and idempotency keys. The
+`matrix-nio` store holds the device's cryptographic identity. The database,
+cryptographic store, and session file must all be persisted.
+
+## HTTP API
+
+Every `/v1/*` endpoint requires:
+
+```http
+Authorization: Bearer <api_token>
+```
+
+The token is a server-side secret. It must never be embedded in the Docs
+frontend JavaScript. The future UI button will call the Docs backend, which
+will then call Notifier.
+
+Interactive OpenAPI documentation is available at `/docs` while the service is
+running.
+
+### Enable notifications
+
+```bash
+curl -X POST http://127.0.0.1:8085/v1/subscriptions \
+  -H "Authorization: Bearer $NOTIFIER_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"recipient":"@bob:localhost"}'
+```
+
+Response before the invitation is accepted in Tchap:
+
+```json
+{
+  "recipient": "@bob:localhost",
+  "status": "pending",
+  "room_id": "!abc:localhost"
+}
+```
+
+`POST /v1/subscriptions` is idempotent while the subscription is `pending` or
+`active`. After revocation, it creates a new invitation.
+
+### Read a subscription
+
+```bash
+curl --get http://127.0.0.1:8085/v1/subscriptions \
+  -H "Authorization: Bearer $NOTIFIER_API_TOKEN" \
+  --data-urlencode 'recipient=@bob:localhost'
+```
+
+Possible states:
+
+- `pending`: invitation sent but not yet accepted;
+- `active`: the user joined the room and messages may be sent;
+- `revoked`: invitation declined, room left, or subscription disabled;
+- `error`: permanent conversation failure.
+
+### Disable notifications
+
+```bash
+curl -X DELETE 'http://127.0.0.1:8085/v1/subscriptions?recipient=%40bob%3Alocalhost' \
+  -H "Authorization: Bearer $NOTIFIER_API_TOKEN"
+```
+
+The bot leaves the room and cancels notifications that have not been sent.
+
+### Send a document notification
+
+A subscription must already exist. Without prior activation, the API returns
+`409 Conflict` and does not create an invitation.
+
+```bash
+curl -X POST http://127.0.0.1:8085/v1/notifications \
+  -H "Authorization: Bearer $NOTIFIER_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "@bob:localhost",
+    "idempotency_key": "document-42-version-7-bob",
+    "actor_name": "Alice Martin",
+    "document_id": "42",
+    "document_title": "Budget 2027",
+    "document_url": "https://docs.example.test/docs/42",
+    "change_type": "updated",
+    "occurred_at": "2026-09-16T10:30:00Z"
+  }'
+```
+
+The HTTP response is `202 Accepted`. If the invitation is still pending, the
+delivery status is `awaiting_recipient`. If the subscription is active, it is
+`queued` and then becomes `sent` after Matrix accepts the message.
+
+`idempotency_key` must identify one unique logical delivery. It should normally
+include the Docs event identifier and the recipient identifier. Reusing the
+same key returns the existing delivery without creating a duplicate message.
+
+### Read a delivery
+
+```bash
+curl http://127.0.0.1:8085/v1/deliveries/DELIVERY_ID \
+  -H "Authorization: Bearer $NOTIFIER_API_TOKEN"
+```
+
+Possible states are `awaiting_recipient`, `queued`, `sending`, `sent`,
+`recipient_declined`, and `failed`.
+
+### Health checks
+
+```bash
+curl http://127.0.0.1:8085/healthz
+curl http://127.0.0.1:8085/readyz
+```
+
+`/readyz` returns `200` only while the Matrix session is connected.
+
+## Local setup with the tchap-web-notifs Synapse server
+
+### 1. Start Tchap and Matrix
+
+From the neighboring `tchap-web-notifs` repository:
+
+```bash
+TCHAP_PUBLIC_HOST=127.0.0.1 ./run-tchap.sh
+```
+
+Synapse then listens on `http://127.0.0.1:8008`. Bob is available with the
+Matrix ID `@bob:localhost`.
+
+### 2. Create the local Notifier account
+
+This command only needs to be run once:
+
+```bash
+docker exec -it tchap-matrix-local \
+  register_new_matrix_user \
+  -u notifier \
+  -p 'NotifierLocal2026!' \
+  --no-admin \
+  --exists-ok \
+  -c /data/homeserver.yaml \
+  http://localhost:8008
+```
+
+### 3. Configure the service
+
+```bash
+cp config.example.toml config.toml
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+Copy the generated secret into `api_token`. The local Docker configuration
+should contain at least:
+
+```toml
+homeserver = "http://host.docker.internal:8008"
+bot_username = "@notifier:localhost"
+bot_password = "NotifierLocal2026!"
+api_token = "THE_GENERATED_SECRET"
+```
+
+Git ignores `config.toml`, tokens, and cryptographic keys. The provided Compose
+file stores the database, session, and cryptographic store in the named
+`notifier_data` Docker volume.
+
+### 4. Start Notifier
+
+```bash
+docker compose up --build
+```
+
+Then check readiness:
+
+```bash
+curl http://127.0.0.1:8085/readyz
+```
+
+Use the API examples with `@bob:localhost`, then sign in to Tchap as Bob and
+accept the invitation.
+
+`docker compose down` stops the service without deleting its Matrix identity.
+Avoid `docker compose down -v`: it also deletes the E2EE store, session, and
+delivery database.
+
+## Development without Docker
+
+Requirements: Python 3.11 or 3.12, Poetry, and the system dependencies required
+by `matrix-nio[e2e]`.
+
+```bash
 poetry install
+cp config.example.toml config.toml
 ```
 
-# Le compte utilisateur du bot
+For execution outside Docker, adjust the homeserver and storage paths:
 
-Le compte utilisateur utilisé par le bot doit être créé manuellement (via Tchap web par exemple) comme un compte utilisateur classique (avec un email dédié et autorisé donc).
-
-C'est un compte utilisateur classique (associé à une adresse email), soumis aux mêmes possibilités et contraintes que tout autre compte utilisateur :
-- ce qui peut être fait ou configuré sur un compte utilisateur classique peut donc être fait sur un compte bot
-- ce qui ne peut pas être fait avec un compte utilisateur classique ne peut pas être fait par un compte bot non plus
-
-**Un compte pour bot est donc soumis à la procédure de renouvellement périodique de compte via email. La notion de "compte de service" n'existe pas actuellement sur Tchap .**
-
-# Le fichier `config.toml`
-
-Il est nécessaire de créer un fichier `config.toml` contenant les informations de connexion de votre bot.
-
-Ce fichier peut aussi contenir une liste de MatrixID de salons dans lesquels le bot est autorisé d'agir. Il est recommandé de renseigner cette liste pour restreindre le champ d'action du bot.
-
-Ce fichier contenant des informations sensibles, il n'est pas gitté.
-```
-homeserver = "<your matrix server https://matrix.…>"
-
-bot_username = "<your username someone@beta.gouv.fr>"
-bot_password = "<your password>"
-
-allowed_room_ids = [
-    "<matrix-id-of-allowed-room#1>",
-]
+```toml
+homeserver = "http://127.0.0.1:8008"
+database_path = "./data/notifier.sqlite3"
+matrix_store_path = "./data/store"
+matrix_session_path = "./data/session.txt"
 ```
 
-# Construire l'image du container Docker
-```
-docker build --target=runtime --tag tchap-sample-bot .
-```
+Then run:
 
-# Démarrer le container Docker
-
-L'option `--env PYTHONBUFFERED=1` permet d'avoir les sorties de python dans la console.
-```
-docker run --env PYTHONBUFFERED=1 --volume <path-to-your-local-config-file>:/data/config.toml tchap-sample-bot
+```bash
+poetry run notifier
 ```
 
-L'option `--rm` supprime le container à la fin de l'exécution. Attention, car cette option supprimera aussi la session en cours du Bot (car le stockage des données du Bot disparaîtront avec le container). Il créera donc systématiquement une nouvelle session lors du prochain lancement. Il est possible de stocker ces données en dehors du container via l'option `--volume`, mais cela expose des donnés sensibles.
+Run tests and quality checks with:
+
+```bash
+poetry run pytest
+poetry run ruff check .
+poetry run basedpyright
 ```
-docker run -rm --env PYTHONBUFFERED=1 --volume <path-to-your-local-config-file>:/data/config.toml tchap-sample-bot
-```
 
-# Structure du projet
+## Tchap deployment
 
-Le projet utilise `Poetry`, un gestionnaire de dépendances pour Python : https://python-poetry.org/docs
+The Notifier account must be created manually through Tchap with a working,
+authorized email address. Tchap does not currently provide service accounts, so
+the account remains subject to periodic renewal by email.
 
-À la racine du projet se trouvent les fichiers :
-- `Dockerfile` : le script de création du conntainer Docker du bot
-- `config.toml` : le fichier des paramètres de connexion du bot (non gitté)
-- `pyproject.toml` : le fichier de dépendances du projet, utilisé par Poetry lors de la construction de l'image Docker
-- `scripts/commands` : le dossier contenant les implémentations des commandes supportées par le bot
+In production:
 
-## Démarrage du bot
-Le fichier `pyproject.toml` définit le point d'entrée du programme à : `scripts.startbot:main`
-C'est à cet endroit que : 
-- la configuration du bot est chargée via `BotConfig`
-- le bot est créé via `ValidateBot`
-- le bot est lancé via `bot.run()`
+- use the Notifier account's homeserver, not the recipient's homeserver;
+- pass complete Matrix IDs to the API, for example
+  `@first.last:agent.dinum.tchap.gouv.fr`;
+- keep `/data` on a backed-up persistent volume;
+- inject `bot_password` and `api_token` from a secret manager;
+- expose the API only to the Docs backend, preferably on a private network;
+- terminate TLS at the reverse proxy;
+- monitor `/readyz` and deliveries in the `failed` state;
+- never delete `store/` or `session.txt` without a cryptographic-device
+  rotation procedure.
 
-## Les commandes implémentées dans le bot
-Dans le fichier `startbot.py`, la variable `COMMANDS` liste les commandes accessibles (c'est les noms des classes correspondantes suffixées par `Command`).
+`NOTIFIER_*` environment variables override `config.toml`, including
+`NOTIFIER_API_TOKEN`, `NOTIFIER_BOT_PASSWORD`, and `NOTIFIER_HOMESERVER`.
+`NOTIFIER_CONFIG` selects a different TOML configuration file.
 
-Les classes implémentant les actions sont dans `scripts/commands`.
+## Guarantees and limitations
 
-Dans cet exemple : 
-- `get_hour` : le bot renvoie l'heure actuelle avec la commande `!get_hour`
-- `get_rss` : le bot renvoit un flux RSS formaté avec la commande `!get_rss <URL du flux RSS souhaité>`
-
-# La commande `get_rss`
-Elle est implementée dans le fichier `scripts/commands/get_rss.py` par la classe `GetHourCommand`.
-
-La variable `KEYWORD` contient le nom de la commande (qui sera préfixée par `!` pour être reconnue comme une commande).
-Ce préfixe est standard mais peut être customisé (voir https://code.peren.fr/MatMaul/tchapbot/-/tree/tchapadmin).
-
-La fonction `needs_secure_validation` peut renvoyer `TRUE` si le lancement de l'action nécessite une validation (saisie de `YES` voire d'un code OTP).
-Dans cet exemple, ce niveau de sécurisation n'est pas abordé. Il est utilisé en interne chez Tchap.
-
-Si une commande `!get_rss <args>` est saisie, elle sera à une nouvelle instance de la classe `GetRssCommand`.
-
-1. un `MessageEventParser` est créé à l'instanciation pour ce client dans cette room, pour le message qui vient d'être reçu
-2. si le message est envoyé par le bot, il est ignoré par la commande `do_not_accept_own_message`
-3. les éventuels arguments de la commande sont récupérés par `args = event_parser.command(self.KEYWORD).split()`
-4. la méthode asynchrone `execute` prend le relai et fait le traitement réel (dans notre cas, récupérer le contenu du flux RSS et le mettre en forme)
-5. la méthode `execute` finit par envoyer un message dans la room contenant le flux RS formaté, via l'appel `send_text_message`
-
-Exemples de flux RSS :
-- https://next.ink/rss
-- https://www.lemonde.fr/actualite-medias/article/2019/08/12/les-flux-rss-du-monde-fr_5498778_3236.html
-- https://www.lemonde.fr/rss/une.xml
-- https://www.lemonde.fr/politique/rss_full.xml
-- https://www.lemonde.fr/culture/rss_full.xml
-- https://www.lemonde.fr/sport/rss_full.xml
-- https://www.lemonde.fr/pixels/rss_full.xml
-- https://www.lefigaro.fr/rss/figaro_actualites.xml
-- https://www.lefigaro.fr/rss/figaro_politique.xml
-- https://www.lefigaro.fr/rss/figaro_elections.xml
-- https://www.lefigaro.fr/rss/figaro_international.xml
-- https://www.lefigaro.fr/rss/figaro_culture.xml
+- The HTTP API and Matrix both use idempotent identifiers to limit duplicates
+  during retries.
+- Messages are encrypted in E2EE Matrix rooms.
+- A user must accept the invitation before the first delivery.
+- Leaving the room revokes permission to send messages.
+- Notifier does not resolve email addresses into Matrix IDs.
+- The database contains the body of pending messages and must be protected as
+  sensitive application data.
