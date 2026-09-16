@@ -213,19 +213,23 @@ file stores the database, session, and cryptographic store in the named
 ### 4. Start Notifier
 
 ```bash
-docker compose up --build
+bash ./run.sh start
 ```
 
 Then check readiness:
 
 ```bash
-curl http://127.0.0.1:8085/readyz
+bash ./run.sh status
 ```
+
+The launcher detects either `docker compose` or the legacy `docker-compose`
+command. It also provides `stop`, `restart`, and `logs` commands. You can still
+run `docker compose up --build` directly if preferred.
 
 Use the API examples with `@bob:localhost`, then sign in to Tchap as Bob and
 accept the invitation.
 
-`docker compose down` stops the service without deleting its Matrix identity.
+`bash ./run.sh stop` stops the service without deleting its Matrix identity.
 Avoid `docker compose down -v`: it also deletes the E2EE store, session, and
 delivery database.
 
