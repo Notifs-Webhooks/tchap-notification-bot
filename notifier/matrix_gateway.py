@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from collections.abc import Awaitable, Callable
+from io import BytesIO
+from pathlib import Path
+from typing import TypedDict, cast
 
 from matrix_bot.auth import AuthLogin, Credentials
 from matrix_bot.client import MatrixClient
@@ -13,18 +18,27 @@ from nio import (
     ErrorResponse,
     Event,
     MatrixRoom,
+    ProfileGetAvatarResponse,
     RoomCreateResponse,
     RoomMemberEvent,
     RoomPreset,
     RoomSendResponse,
     RoomVisibility,
     SyncResponse,
+    UploadResponse,
 )
 
 from notifier.settings import NotifierSettings
 
 logger = logging.getLogger(__name__)
 MembershipHandler = Callable[[str, str, str], Awaitable[None]]
+
+
+class AvatarState(TypedDict):
+    """Persistent link between the bundled image and its Matrix media URI."""
+
+    sha256: str
+    content_uri: str
 
 
 class MatrixOperationError(RuntimeError):
@@ -49,6 +63,7 @@ class TchapMatrixGateway:
         self.client = MatrixClient(AuthLogin(credentials))
         self.settings = settings
         self._membership_handler: MembershipHandler | None = None
+        self._avatar_content_uri: str | None = None
         self._connected = False
 
     @property
@@ -68,9 +83,12 @@ class TchapMatrixGateway:
         if isinstance(display_name_response, ErrorResponse):
             logger.warning("Could not update the bot display name")
 
+        await self._ensure_avatar()
+
         sync_response = await self.client.sync(timeout=0, full_state=True)
         if not isinstance(sync_response, SyncResponse):
             raise MatrixOperationError(f"Initial Matrix sync failed: {sync_response}")
+        await self._ensure_existing_room_avatars()
         self._connected = True
         logger.info(
             "Notifier connected to Matrix",
@@ -80,6 +98,112 @@ class TchapMatrixGateway:
                 "device_id": self.client.device_id,
             },
         )
+
+    @property
+    def _avatar_state_path(self) -> Path:
+        return self.settings.matrix_store_path / "notifier-avatar.json"
+
+    def _load_avatar_state(self) -> AvatarState | None:
+        try:
+            raw_state: object = json.loads(
+                self._avatar_state_path.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+        if not isinstance(raw_state, dict):
+            return None
+        state = cast("dict[str, object]", raw_state)
+        sha256 = state.get("sha256")
+        content_uri = state.get("content_uri")
+        if not isinstance(sha256, str) or not isinstance(content_uri, str):
+            return None
+        if not content_uri.startswith("mxc://"):
+            return None
+        return {"sha256": sha256, "content_uri": content_uri}
+
+    def _save_avatar_state(self, state: AvatarState) -> None:
+        state_path = self._avatar_state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = state_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(state, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary_path.replace(state_path)
+
+    async def _ensure_avatar(self) -> None:
+        avatar_path = self.settings.bot_avatar_path
+        try:
+            avatar_data = avatar_path.read_bytes()
+        except OSError as error:
+            raise MatrixOperationError(
+                f"Could not read the bot avatar at {avatar_path}: {error}"
+            ) from error
+
+        avatar_hash = hashlib.sha256(avatar_data).hexdigest()
+        avatar_state = self._load_avatar_state()
+        content_uri: str
+
+        if avatar_state is not None and avatar_state["sha256"] == avatar_hash:
+            content_uri = avatar_state["content_uri"]
+        else:
+            upload_response, _ = await self.client.upload(
+                BytesIO(avatar_data),
+                content_type="image/png",
+                filename=avatar_path.name,
+                filesize=len(avatar_data),
+            )
+            if not isinstance(upload_response, UploadResponse):
+                raise MatrixOperationError(
+                    f"Could not upload the bot avatar: {upload_response}"
+                )
+            content_uri = upload_response.content_uri
+            self._save_avatar_state({"sha256": avatar_hash, "content_uri": content_uri})
+
+        self._avatar_content_uri = content_uri
+        avatar_response = await self.client.get_avatar()
+        if (
+            isinstance(avatar_response, ProfileGetAvatarResponse)
+            and avatar_response.avatar_url == content_uri
+        ):
+            logger.info("Notifier avatar is already up to date")
+            return
+
+        set_avatar_response = await self.client.set_avatar(content_uri)
+        if isinstance(set_avatar_response, ErrorResponse):
+            raise MatrixOperationError(
+                f"Could not update the bot avatar: {set_avatar_response}"
+            )
+        logger.info("Notifier avatar updated")
+
+    async def _ensure_existing_room_avatars(self) -> None:
+        content_uri = self._avatar_content_uri
+        if content_uri is None:
+            raise MatrixOperationError("The bot avatar has not been initialized")
+
+        for room in self.client.rooms.values():
+            if (
+                room.name != self.settings.room_name
+                or room.room_avatar_url == content_uri
+            ):
+                continue
+            response = await self.client.room_put_state(
+                room.room_id,
+                "m.room.avatar",
+                {"url": content_uri},
+            )
+            if isinstance(response, ErrorResponse):
+                logger.warning(
+                    "Could not update the conversation avatar",
+                    extra={"room_id": room.room_id},
+                )
+                continue
+            room.room_avatar_url = content_uri
+            logger.info(
+                "Conversation avatar updated",
+                extra={"room_id": room.room_id},
+            )
 
     async def _on_membership(
         self,
@@ -101,6 +225,9 @@ class TchapMatrixGateway:
 
     async def create_direct_room(self, recipient: str) -> str:
         """Create an encrypted direct room and invite the recipient."""
+
+        if self._avatar_content_uri is None:
+            raise MatrixOperationError("The bot avatar has not been initialized")
 
         response = await self.client.room_create(
             visibility=RoomVisibility.private,
@@ -125,6 +252,11 @@ class TchapMatrixGateway:
                     "type": "m.room.guest_access",
                     "state_key": "",
                     "content": {"guest_access": "forbidden"},
+                },
+                {
+                    "type": "m.room.avatar",
+                    "state_key": "",
+                    "content": {"url": self._avatar_content_uri},
                 },
             ],
         )

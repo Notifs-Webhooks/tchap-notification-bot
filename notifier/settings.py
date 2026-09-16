@@ -15,6 +15,8 @@ from pydantic_settings import (
 )
 from typing_extensions import override
 
+DEFAULT_BOT_AVATAR_PATH = Path(__file__).resolve().parent.parent / "icon.png"
+
 
 class NotifierSettings(BaseSettings):
     """Configuration loaded from config.toml and overridden by the environment."""
@@ -37,6 +39,7 @@ class NotifierSettings(BaseSettings):
     matrix_session_path: Path = Path("/data/session.txt")
 
     bot_display_name: str = "Notifier"
+    bot_avatar_path: Path = DEFAULT_BOT_AVATAR_PATH
     room_name: str = "Docs notifications"
     room_topic: str = (
         "Notifications about changes to your documents. "

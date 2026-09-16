@@ -18,6 +18,8 @@ COPY notifier ./notifier
 
 RUN --mount=type=cache,target=$POETRY_CACHE_DIR poetry install --without dev --compile
 
+COPY icon.png ./icon.png
+
 FROM builder AS test
 
 COPY tests ./tests
