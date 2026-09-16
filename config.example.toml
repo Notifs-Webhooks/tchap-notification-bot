@@ -1,0 +1,24 @@
+# URL of the homeserver that hosts the Notifier account.
+# In local Docker, host.docker.internal reaches Synapse on the host.
+homeserver = "http://host.docker.internal:8008"
+bot_username = "@notifier:localhost"
+bot_password = "CHANGE-ME"
+
+# Secret used by applications authorized to call the API.
+# Use at least 32 random characters in production.
+api_token = "CHANGE-ME-WITH-AT-LEAST-32-CHARACTERS"
+
+api_host = "0.0.0.0"
+api_port = 8085
+
+# These three paths must be stored on a persistent volume.
+database_path = "/data/notifier.sqlite3"
+matrix_store_path = "/data/store"
+matrix_session_path = "/data/session.txt"
+
+bot_display_name = "Notifier"
+room_name = "Docs notifications"
+room_topic = "Notifications about changes to your documents. Leave this room to stop receiving them."
+
+dispatch_interval_seconds = 1.0
+max_delivery_attempts = 5

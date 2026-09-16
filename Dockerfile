@@ -14,13 +14,25 @@ ENV POETRY_NO_INTERACTION=1 \
 WORKDIR /app
 
 COPY pyproject.toml poetry.lock ./
-COPY scripts ./scripts
+COPY notifier ./notifier
 
 RUN --mount=type=cache,target=$POETRY_CACHE_DIR poetry install --without dev --compile
+
+FROM builder AS test
+
+COPY tests ./tests
+
+RUN --mount=type=cache,target=$POETRY_CACHE_DIR poetry install --with dev --compile
+RUN poetry run pytest \
+    && poetry run ruff format --check . \
+    && poetry run ruff check . \
+    && poetry run basedpyright
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 COPY --from=builder /app /app
 
 WORKDIR /data
-ENTRYPOINT ["/app/.venv/bin/bot-entry-point"]
+EXPOSE 8085
+
+ENTRYPOINT ["/app/.venv/bin/notifier"]
