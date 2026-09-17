@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from notifier.models import (
@@ -8,7 +10,7 @@ from notifier.models import (
     DocumentChangeType,
     DocumentNotificationRequest,
 )
-from notifier.service import SubscriptionRequiredError
+from notifier.service import SubscriptionRequiredError, render_document_notification
 
 RECIPIENT = "@alice:localhost"
 
@@ -22,6 +24,24 @@ def notification(key: str = "doc-42-v1") -> DocumentNotificationRequest:
         document_title="Budget 2027",
         document_url="https://docs.example.test/docs/42",
         change_type=DocumentChangeType.UPDATED,
+    )
+
+
+def test_renders_document_digest_summary() -> None:
+    digest = notification().model_copy(
+        update={
+            "actor_name": "Alice and Bob",
+            "change_count": 3,
+            "period_start": datetime.fromisoformat("2026-09-17T10:00:00+00:00"),
+            "period_end": datetime.fromisoformat("2026-09-17T11:00:00+00:00"),
+        }
+    )
+
+    assert render_document_notification(digest) == (
+        "📝 Document update summary\n\n"
+        'Alice and Bob made 3 saved updates to "Budget 2027".\n'
+        "Period: 2026-09-17T10:00+00:00 to 2026-09-17T11:00+00:00\n\n"
+        "Open document: https://docs.example.test/docs/42"
     )
 
 

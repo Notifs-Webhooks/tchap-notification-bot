@@ -67,6 +67,24 @@ CHANGE_LABELS: dict[DocumentChangeType, tuple[str, str]] = {
 def render_document_notification(request: DocumentNotificationRequest) -> str:
     """Build the plain-text message displayed in Tchap."""
 
+    if request.period_start is not None and request.period_end is not None:
+        update_label = "saved update" if request.change_count == 1 else "saved updates"
+        lines = [
+            "📝 Document update summary",
+            "",
+            (
+                f"{request.actor_name} made {request.change_count} {update_label} "
+                f'to "{request.document_title}".'
+            ),
+            (
+                f"Period: {request.period_start.isoformat(timespec='minutes')} "
+                f"to {request.period_end.isoformat(timespec='minutes')}"
+            ),
+        ]
+        if request.document_url:
+            lines.extend(("", f"Open document: {request.document_url}"))
+        return "\n".join(lines)
+
     title, verb = CHANGE_LABELS[request.change_type]
     lines = [
         f"📝 {title}",

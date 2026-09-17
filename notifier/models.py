@@ -5,8 +5,16 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
+from typing import Self
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 MATRIX_USER_ID_PATTERN = re.compile(r"^@[^:\s]+:.+$")
 
@@ -74,11 +82,26 @@ class DocumentNotificationRequest(SubscriptionRequest):
     change_type: DocumentChangeType
     document_url: AnyHttpUrl | None = None
     occurred_at: datetime | None = None
+    change_count: int = Field(default=1, ge=1)
+    period_start: datetime | None = None
+    period_end: datetime | None = None
 
     @field_validator("actor_name", "document_title")
     @classmethod
     def collapse_line_breaks(cls, value: str) -> str:
         return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def validate_digest_period(self) -> Self:
+        if (self.period_start is None) != (self.period_end is None):
+            raise ValueError("period_start and period_end must be provided together")
+        if (
+            self.period_start is not None
+            and self.period_end is not None
+            and self.period_end <= self.period_start
+        ):
+            raise ValueError("period_end must be after period_start")
+        return self
 
 
 class SubscriptionResponse(BaseModel):
