@@ -1,7 +1,9 @@
 # Notifier
 
 Notifier is an HTTP service that turns changes made in Docs into end-to-end
-encrypted Tchap direct messages.
+encrypted Tchap direct messages. In the local Docs integration, it receives
+hourly, weekly, or monthly document summaries; empty periods are filtered out
+by Docs and never reach Notifier.
 
 It is built on `tchap-bot`, the library used by Tchap bots, and `matrix-nio`.
 The Notifier account is a regular Tchap account: it cannot force a user to join
@@ -12,7 +14,7 @@ a conversation.
 Enabling notifications is voluntary and happens in two stages:
 
 1. the Docs backend calls `POST /v1/subscriptions` after the user clicks the
-   future "Enable Tchap notifications" button;
+   **Enable notifications** switch;
 2. Notifier creates an encrypted private room and invites the user;
 3. the subscription remains `pending` until the user accepts the invitation in
    Tchap;
@@ -26,12 +28,13 @@ Notifier never automatically reinvites a user who declined the invitation or
 left the room. A new explicit `POST /v1/subscriptions` call, resulting from a
 new user action, is required.
 
-A notification looks like this:
+A digest looks like this:
 
 ```text
-📝 Document updated
+📝 Document update summary
 
-Alice Martin updated "Budget 2027".
+Alice Martin and Bob Dupont made 3 saved updates to "Budget 2027".
+Period: 2026-09-16T10:00+00:00 to 2026-09-16T11:00+00:00
 
 Open document: https://docs.example.test/docs/42
 ```
@@ -66,8 +69,7 @@ Authorization: Bearer <api_token>
 ```
 
 The token is a server-side secret. It must never be embedded in the Docs
-frontend JavaScript. The future UI button will call the Docs backend, which
-will then call Notifier.
+frontend JavaScript. The UI calls the Docs backend, which then calls Notifier.
 
 Interactive OpenAPI documentation is available at `/docs` while the service is
 running.
@@ -129,12 +131,15 @@ curl -X POST http://127.0.0.1:8085/v1/notifications \
   -H 'Content-Type: application/json' \
   -d '{
     "recipient": "@bob:localhost",
-    "idempotency_key": "document-42-version-7-bob",
-    "actor_name": "Alice Martin",
+    "idempotency_key": "document-42-hourly-2026-09-16T10:00:00Z",
+    "actor_name": "Alice Martin and Bob Dupont",
     "document_id": "42",
     "document_title": "Budget 2027",
     "document_url": "https://docs.example.test/docs/42",
     "change_type": "updated",
+    "change_count": 3,
+    "period_start": "2026-09-16T10:00:00Z",
+    "period_end": "2026-09-16T11:00:00Z",
     "occurred_at": "2026-09-16T10:30:00Z"
   }'
 ```
@@ -143,9 +148,11 @@ The HTTP response is `202 Accepted`. If the invitation is still pending, the
 delivery status is `awaiting_recipient`. If the subscription is active, it is
 `queued` and then becomes `sent` after Matrix accepts the message.
 
-`idempotency_key` must identify one unique logical delivery. It should normally
-include the Docs event identifier and the recipient identifier. Reusing the
-same key returns the existing delivery without creating a duplicate message.
+`period_start` and `period_end` are optional, but must be provided together.
+When present, Notifier renders a digest and uses `change_count`; without them it
+renders the legacy single-change template. Docs uses one idempotency key per
+document, frequency, and completed period. Reusing the same key returns the
+existing delivery without creating a duplicate message.
 
 ### Read a delivery
 
@@ -198,17 +205,18 @@ docker exec -it tchap-matrix-local \
 
 ```bash
 cp config.example.toml config.toml
-python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 ```
 
-Copy the generated secret into `api_token`. The local Docker configuration
+For the integrated local Docs demonstration, Compose injects the shared
+development token `local-demo-notifier-api-token-2026`. The `api_token` below
+is therefore used only when running without Compose. The local configuration
 should contain at least:
 
 ```toml
 homeserver = "http://host.docker.internal:8008"
 bot_username = "@notifier:localhost"
 bot_password = "NotifierLocal2026!"
-api_token = "THE_GENERATED_SECRET"
+api_token = "local-demo-notifier-api-token-2026"
 ```
 
 Git ignores `config.toml`, tokens, and cryptographic keys. The provided Compose
@@ -233,6 +241,13 @@ run `docker compose up --build` directly if preferred.
 
 Use the API examples with `@bob:localhost`, then sign in to Tchap as Bob and
 accept the invitation.
+
+When Notifier is started alongside `docs-notifs`, both Compose projects join
+the external `lasuite-network`. The Docs backend reaches this service at
+`http://notifier:8085`; the browser never sees the API token. See the
+notification section at the very top of `../docs-notifs/README.md` for the
+startup order, and `../docs-notifs/NOTIFICATION_SYSTEM.md` for the complete
+end-to-end architecture and implementation details.
 
 `bash ./run.sh stop` stops the service without deleting its Matrix identity.
 Avoid `docker compose down -v`: it also deletes the E2EE store, session, and
